@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Physically Accurate Head Tracking</title>
+    <title>Interactive 3D Head Tracking</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; }
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; color: #eee; }
         
         /* Main 3D Canvas */
         #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
@@ -12,27 +12,69 @@
         /* UI Overlays */
         #info {
             position: absolute; top: 10px; left: 10px; z-index: 10;
-            color: lime; font-family: monospace; background: rgba(0,0,0,0.5); padding: 10px;
+            color: lime; font-family: monospace; background: rgba(0,0,0,0.5); padding: 5px 10px;
             pointer-events: none;
         }
 
         #webcam-preview {
-            position: absolute; bottom: 10px; left: 10px; width: 200px; z-index: 10;
-            border: 1px solid #555; transform: scaleX(-1); opacity: 0.8;
+            position: absolute; bottom: 10px; left: 10px; width: 160px; z-index: 10;
+            border: 2px solid #555; transform: scaleX(-1); opacity: 0.7;
+            border-radius: 8px;
         }
 
         #loading {
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-            color: white; font-size: 1.2rem; z-index: 20;
+            color: white; font-size: 1.5rem; z-index: 20; text-shadow: 0 0 10px black;
         }
+
+        /* CONTROLS SIDEBAR */
+        #controls-container {
+            position: absolute; top: 10px; right: 10px; width: 250px;
+            background: rgba(30, 30, 30, 0.9); padding: 20px; border-radius: 12px;
+            z-index: 30; border: 1px solid #444; box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 0.9rem;}
+        .val-display { float: right; color: lime; font-weight: normal;}
+        input[type=range] { width: 100%; accent-color: lime; }
+        
+        /* Custom File Upload Styling */
+        .custom-file-upload {
+            display: block; width: 100%; padding: 10px;
+            background: #333; border: 1px dashed #666;
+            text-align: center; cursor: pointer; border-radius: 6px; transition: background 0.3s;
+        }
+        .custom-file-upload:hover { background: #444; border-color: lime; }
+        #file-input { display: none; }
     </style>
 </head>
 <body>
 
-    <div id="loading">Initializing Neural Network...</div>
-    <div id="info">Waiting for face...</div>
+    <div id="loading">Initializing AI & GPU...</div>
+    <div id="info">Waiting for face detection...</div>
     <video id="webcam-preview" autoplay playsinline muted></video>
     <div id="canvas-container"></div>
+
+    <div id="controls-container">
+        <div class="control-group">
+            <label>Webcam Vertical FOV: <span id="fov-val" class="val-display">55°</span></label>
+            <input type="range" id="fov-slider" min="30" max="80" step="1" value="55">
+            <small style="color:#aaa">Adjust until depth movement feels realistic.</small>
+        </div>
+
+        <div class="control-group" style="border-top: 1px solid #444; padding-top: 20px;">
+            <label>Object Scale Multiplier: <span id="scale-val" class="val-display">1.0x</span></label>
+            <input type="range" id="scale-slider" min="0.1" max="10" step="0.1" value="1.0">
+        </div>
+
+        <div class="control-group">
+            <label for="file-input" class="custom-file-upload">
+                📁 Upload local STL file
+            </label>
+            <input id="file-input" type="file" accept=".stl" />
+        </div>
+    </div>
+
 
     <script type="importmap">
         {
@@ -50,14 +92,21 @@
         import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
 
         // ==========================================
-        // 1. PHYSICAL CONFIGURATION (MEASURE THESE)
+        // 1. GLOBAL STATE & CONFIG
         // ==========================================
         const CONFIG = {
-            WEBCAM_FOV_Y: 55,     // Webcam Vertical Field of View (Degrees). 
-                                  // Most laptops are ~50-60. iPhones ~60.
-            REAL_IPD_CM: 6.4,     // Distance between your pupils in cm. (Avg is 6.3 - 6.5)
-            SMOOTHING: 0.2       // 0.01 (very smooth/slow) to 1.0 (instant/jittery)
+            WEBCAM_FOV_Y: 55,     // Updated by slider
+            REAL_IPD_CM: 6.4,     // Avg human IPD
+            SMOOTHING: 0.15
         };
+
+        // Math helper variable (calculated later)
+        let focalLengthNorm = 0;
+
+        // Mesh State
+        let currentMesh = null;
+        let baseNormalizedScale = 1.0; // Scale required to make object 10cm wide initially
+        let scaleMultiplier = 1.0;     // Value from slider (0.1x to 10x)
 
         // ==========================================
         // 2. THREE.JS SETUP
@@ -65,7 +114,7 @@
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x111111);
 
-        const camera = new THREE.PerspectiveCamera(CONFIG.WEBCAM_FOV_Y, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const camera = new THREE.PerspectiveCamera(CONFIG.WEBCAM_FOV_Y, window.innerWidth / window.innerHeight, 0.1, 2000);
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.getElementById('canvas-container').appendChild(renderer.domElement);
@@ -74,57 +123,131 @@
         const light = new THREE.DirectionalLight(0xffffff, 2);
         light.position.set(10, 20, 15);
         scene.add(light);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-        // Helper Grid (1 unit = 1cm) -> 20cm grid
-        const grid = new THREE.GridHelper(50, 50, 0x444444, 0x222222);
+        // Helper Grid (1 unit = 1cm) -> 50cm grid
+        const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
         scene.add(grid);
+        
+        // Add Axes helper at origin
+        scene.add(new THREE.AxesHelper(10));
 
-        // Load STL or Fallback
         const stlLoader = new STLLoader();
-        stlLoader.load('./model.stl', (geometry) => {
-            geometry.center();
-            geometry.computeBoundingBox();
-            
-            // Normalize size: Scale object to be 10cm wide
-            const width = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
-            const scaleFactor = 10 / width; 
-            
-            const material = new THREE.MeshNormalMaterial();
-            const mesh = new THREE.Mesh(geometry, material);
-            mesh.scale.set(scaleFactor, scaleFactor, scaleFactor);
-            mesh.rotation.x = -Math.PI / 2;
-            scene.add(mesh);
-        }, undefined, () => {
-            // Fallback Box (10x10x10 cm)
-            const box = new THREE.Mesh(
-                new THREE.BoxGeometry(10, 10, 10),
-                new THREE.MeshNormalMaterial({ wireframe: false })
-            );
-            scene.add(box);
+        const meshMaterial = new THREE.MeshPhysicalMaterial({
+            color: 0x00aaff, metalness: 0.2, roughness: 0.3, clearcoat: 0.5
         });
 
         // ==========================================
-        // 3. MATH HELPERS (PINHOLE MODEL)
+        // 3. UI & OBJECT MANAGEMENT
         // ==========================================
+
+        // --- Helper: Recalculate Physics Math based on FOV ---
+        function updateFocalLengthMath() {
+             const fovRad = (CONFIG.WEBCAM_FOV_Y * Math.PI) / 180;
+             // focal_length = 0.5 / tan(FOV/2)
+             focalLengthNorm = 0.5 / Math.tan(fovRad / 2);
+        }
+
+        // --- Helper: Replace current mesh in scene ---
+        function replaceMesh(geometry) {
+            if(currentMesh) {
+                scene.remove(currentMesh);
+                currentMesh.geometry.dispose();
+            }
+
+            geometry.center();
+            geometry.computeBoundingBox();
+            geometry.computeVertexNormals(); // Ensure smooth lighting
+
+            // 1. Calculate Base Normalization Scale (make it ~10cm wide initially)
+            const width = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
+            // Guard against zero-width objects
+            baseNormalizedScale = width > 0.001 ? (10 / width) : 1; 
+
+            currentMesh = new THREE.Mesh(geometry, meshMaterial);
+            
+            // STL standard orientation fix
+            currentMesh.rotation.x = -Math.PI / 2; 
+
+            scene.add(currentMesh);
+            // Apply current slider scale instantly
+            applyCurrentScale();
+        }
+
+        // --- Helper: Apply slider scale to base scale ---
+        function applyCurrentScale() {
+            if(!currentMesh) return;
+            const finalScale = baseNormalizedScale * scaleMultiplier;
+            currentMesh.scale.set(finalScale, finalScale, finalScale);
+        }
+
+
+        // --- EVENT LISTENERS FOR UI ---
+
+        // 1. FOV SLIDER
+        const fovSlider = document.getElementById('fov-slider');
+        const fovDisplay = document.getElementById('fov-val');
+        fovSlider.addEventListener('input', (e) => {
+            const val = parseInt(e.target.value);
+            CONFIG.WEBCAM_FOV_Y = val;
+            fovDisplay.innerText = val + "°";
+            
+            // Update ThreeJS Camera
+            camera.fov = val;
+            camera.updateProjectionMatrix();
+            
+            // Update Physics Math
+            updateFocalLengthMath();
+        });
+
+        // 2. SCALE SLIDER
+        const scaleSlider = document.getElementById('scale-slider');
+        const scaleDisplay = document.getElementById('scale-val');
+        scaleSlider.addEventListener('input', (e) => {
+             scaleMultiplier = parseFloat(e.target.value);
+             scaleDisplay.innerText = scaleMultiplier.toFixed(1) + "x";
+             applyCurrentScale();
+        });
+
+        // 3. FILE UPLOAD BUTTON
+        const fileInput = document.getElementById('file-input');
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                 try {
+                     const geometry = stlLoader.parse(event.target.result);
+                     replaceMesh(geometry);
+                     // Reset scale slider for new object interaction
+                     scaleMultiplier = 1.0;
+                     scaleSlider.value = 1.0;
+                     scaleDisplay.innerText = "1.0x";
+                 } catch (err) {
+                     alert("Error parsing STL file. It might be corrupted or wrong format.");
+                     console.error(err);
+                 }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        // --- INITIALIZATION ---
+        updateFocalLengthMath(); // Init math based on default slider value
         
-        // Calculate Focal Length in "Unit Height"
-        // If image height is 1.0, what is focal length?
-        // tan(theta/2) = (height/2) / focal_length
-        // focal_length = 0.5 / tan(FOV/2)
-        const fovRad = (CONFIG.WEBCAM_FOV_Y * Math.PI) / 180;
-        const focalLengthNorm = 0.5 / Math.tan(fovRad / 2);
+        // Load initial fallback cube
+        const initialGeo = new THREE.BoxGeometry(10, 10, 10);
+        replaceMesh(initialGeo);
 
-        // State for smoothing
-        const currentPos = new THREE.Vector3(0, 0, 60); // Start 60cm back
-        const targetPos = new THREE.Vector3(0, 0, 60);
 
         // ==========================================
-        // 4. MEDIAPIPE LOGIC
+        // 4. MEDIAPIPE LOGIC & MAIN LOOP
         // ==========================================
         const video = document.getElementById('webcam-preview');
         const infoDiv = document.getElementById('info');
         let faceLandmarker;
+        const currentPos = new THREE.Vector3(0, 0, 60);
+        const targetPos = new THREE.Vector3(0, 0, 60);
 
         async function initVision() {
             const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -139,65 +262,51 @@
             
             document.getElementById('loading').style.display = 'none';
             
-            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } }).then((stream) => {
+            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } }).then((stream) => {
                 video.srcObject = stream;
                 video.addEventListener("loadeddata", renderLoop);
             });
         }
 
-        // ==========================================
-        // 5. MAIN LOOP
-        // ==========================================
         let lastVideoTime = -1;
 
         function renderLoop() {
             // 1. Detect Face
-            if (video.currentTime !== lastVideoTime) {
+            if (video.currentTime !== lastVideoTime && faceLandmarker) {
                 lastVideoTime = video.currentTime;
                 const results = faceLandmarker.detectForVideo(video, performance.now());
 
                 if (results.faceLandmarks.length > 0) {
                     const landmarks = results.faceLandmarks[0];
 
-                    // --- PHYSICS CALCULATION START ---
-                    
-                    // Left Eye: Index 468 (Iris Center) or 33 (Corner)
-                    // Let's use pupil centers: 468 (Left), 473 (Right)
+                    // Pupils: 468 (Left), 473 (Right)
                     const leftPupil = landmarks[468];
                     const rightPupil = landmarks[473];
-
-                    // Calculate distance between pupils in NORMALIZED coords (0..1)
-                    // We must correct for aspect ratio because pixels aren't square in 0..1 space
                     const aspect = video.videoWidth / video.videoHeight;
                     
+                    // Distance between pupils in normalized screen units
                     const dx = (leftPupil.x - rightPupil.x) * aspect;
                     const dy = (leftPupil.y - rightPupil.y);
-                    const distScreen = Math.sqrt(dx*dx + dy*dy); // Distance in "screen height units"
+                    const distScreen = Math.sqrt(dx*dx + dy*dy);
 
-                    // Z = (Real Size * Focal Length) / Image Size
+                    // Pinhole Z Calculation
                     const zCm = (CONFIG.REAL_IPD_CM * focalLengthNorm) / distScreen;
 
-                    // X and Y position
-                    // Midpoint of eyes in 0..1
+                    // Midpoint in normalized screen coords
                     const midX = (leftPupil.x + rightPupil.x) / 2;
                     const midY = (leftPupil.y + rightPupil.y) / 2;
 
-                    // Convert to centered coordinates [-0.5, 0.5]
-                    // Multiply X by aspect ratio
-                    // Invert X because camera moves OPPOSITE to subject in frame
-                    // (Subject moves Left -> Image moves Right -> Camera must move Left)
+                    // Center coordinates [-0.5, 0.5] and flip X
                     const xScreen = (0.5 - midX) * aspect; 
-                    const yScreen = (0.5 - midY); // +Y is Up
+                    const yScreen = (0.5 - midY);
 
-                    // Project to World Coordinates using similar triangles
-                    // X_world / Z_world = x_screen / f
+                    // Project screen coords to world coords
                     const xCm = (xScreen * zCm) / focalLengthNorm;
                     const yCm = (yScreen * zCm) / focalLengthNorm;
 
                     targetPos.set(xCm, yCm, zCm);
                     
-                    infoDiv.innerText = `Pos: ${xCm.toFixed(1)}, ${yCm.toFixed(1)}, ${zCm.toFixed(1)} cm`;
-                    // --- PHYSICS CALCULATION END ---
+                    infoDiv.innerText = `Head Pos: X:${xCm.toFixed(0)} Y:${yCm.toFixed(0)} Z:${zCm.toFixed(0)} cm`;
                 }
             }
 
@@ -206,7 +315,7 @@
 
             // 3. Update Camera
             camera.position.copy(currentPos);
-            camera.lookAt(0, 0, 0); // Always look at object
+            camera.lookAt(0, 0, 0);
 
             renderer.render(scene, camera);
             requestAnimationFrame(renderLoop);
