@@ -2,348 +2,216 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Three-Point Perspective Cube (Free VPs)</title>
+    <title>3D Head Tracking STL Viewer</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 12px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* Webcam debug view (small, bottom left) */
+        #webcam-container {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 160px;
+            height: 120px;
+            z-index: 2;
+            border: 2px solid white;
+            border-radius: 8px;
             overflow: hidden;
-            max-width: 1200px;
-            width: 100%;
+            background: #222;
         }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            text-align: center;
-        }
-        h1 { font-size: 24px; margin-bottom: 8px; }
-        .subtitle { opacity: 0.9; font-size: 14px; }
-        .canvas-container {
-            position: relative;
-            background: #f8f9fa;
-            border-bottom: 2px solid #e9ecef;
-        }
-        canvas { display: block; cursor: crosshair; }
-        .controls { padding: 24px; background: white; }
-        .control-group { margin-bottom: 20px; }
-        .control-group:last-child { margin-bottom: 0; }
-        label {
-            display: block;
-            font-weight: 600;
-            margin-bottom: 8px;
-            color: #495057;
-            font-size: 14px;
-        }
-        .slider-container { display: flex; align-items: center; gap: 12px; }
-        input[type="range"] {
-            flex: 1; height: 6px; border-radius: 3px; background: #e9ecef;
-            outline: none; -webkit-appearance: none;
-        }
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none; appearance: none;
-            width: 18px; height: 18px; border-radius: 50%;
-            background: #667eea; cursor: pointer; transition: transform 0.2s;
-        }
-        input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.2); }
-        input[type="range"]::-moz-range-thumb {
-            width: 18px; height: 18px; border-radius: 50%;
-            background: #667eea; cursor: pointer; border: none;
-        }
-        .value-display {
-            min-width: 50px; text-align: right; font-weight: 600;
-            color: #667eea; font-size: 14px;
-        }
-        .controls-grid {
-            display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-        }
-        .info {
-            background: #e7f5ff; padding: 12px; border-radius: 6px;
-            font-size: 13px; color: #1864ab; margin-top: 16px;
+        #webcam-video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); /* Mirror the preview */ }
+        
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; z-index: 3; pointer-events: none;
         }
     </style>
 </head>
 <body>
-<div class="container">
-    <div class="header">
-        <h1>Three-Point Perspective Cube</h1>
-        <div class="subtitle">Drag the three vanishing points and the base corner • Adjust edge extents</div>
+
+    <div id="loading">Loading AI Models...</div>
+    <div id="webcam-container">
+        <video id="webcam-video" autoplay playsinline muted></video>
     </div>
+    <div id="canvas-container"></div>
 
-    <div class="canvas-container">
-        <canvas id="canvas" width="1200" height="700"></canvas>
-    </div>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+            }
+        }
+    </script>
 
-    <div class="controls">
-        <div class="controls-grid">
-            <div class="control-group">
-                <label>Extent toward VP1 (a)</label>
-                <div class="slider-container">
-                    <input type="range" id="sideA" min="30" max="400" value="150">
-                    <span class="value-display" id="valueA">150</span>
-                </div>
-            </div>
+    <script type="module">
+        import * as THREE from 'three';
+        import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+        import { FilesetResolver, FaceLandmarker } from '@mediapipe/tasks-vision';
 
-            <div class="control-group">
-                <label>Extent toward VP3 (b)</label>
-                <div class="slider-container">
-                    <input type="range" id="sideB" min="30" max="400" value="150">
-                    <span class="value-display" id="valueB">150</span>
-                </div>
-            </div>
+        // --- 1. CONFIGURATION ---
+        const SENSITIVITY_X = 5.0; // Multiplier for Left/Right movement
+        const SENSITIVITY_Y = 3.0; // Multiplier for Up/Down movement
+        const DEPTH_FACTOR = 10.0; // How much Z-depth changes based on closeness
+        const SMOOTHING = 0.1;     // 0.0 to 1.0 (Lower = smoother but more lag)
 
-            <div class="control-group">
-                <label>Extent toward VP2 (c)</label>
-                <div class="slider-container">
-                    <input type="range" id="sideC" min="30" max="400" value="150">
-                    <span class="value-display" id="valueC">150</span>
-                </div>
-            </div>
-        </div>
+        // --- 2. THREE.JS SETUP ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x202020);
+        
+        // Fog helps with depth perception
+        scene.fog = new THREE.Fog(0x202020, 10, 50);
 
-        <div class="info">
-            Tip: The three vanishing points are independent and always stay within the canvas. The cube is constructed from the base corner (purple) by extending along lines toward each VP by the chosen extents, then completing the box using line intersections.
-        </div>
-    </div>
-</div>
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
 
-<script>
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
 
-    // State
-    const state = {
-        a: 150, // extent toward VP1
-        b: 150, // extent toward VP3
-        c: 150, // extent toward VP2
-        // Base corner (anchor) of the cube
-        anchor: { x: canvas.width / 2, y: canvas.height / 2 + 60 },
-        // Vanishing points (kept inside canvas)
-        vp1: { x: 250, y: 360 }, // red
-        vp2: { x: 950, y: 360 }, // blue
-        vp3: { x: 600, y: 140 }, // green
-        dragging: null
-    };
+        // Helper Grid
+        const gridHelper = new THREE.GridHelper(20, 20, 0x444444, 0x444444);
+        scene.add(gridHelper);
 
-    // Utilities
-    function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
-    function clampPoint(p) {
-        return {
-            x: clamp(p.x, 8, canvas.width - 8),
-            y: clamp(p.y, 8, canvas.height - 8)
-        };
-    }
-    function getMousePos(e) {
-        const r = canvas.getBoundingClientRect();
-        return { x: e.clientX - r.left, y: e.clientY - r.top };
-    }
-    function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+        // --- 3. STL LOADER ---
+        // We will try to load 'model.stl'. If it fails, we show a fallback cube.
+        const loader = new STLLoader();
+        loader.load(
+            './model.stl', 
+            function (geometry) {
+                // Center the geometry
+                geometry.center(); 
+                
+                // Scale normalization (Fit within a unit cube roughly)
+                geometry.computeBoundingBox();
+                const maxDim = Math.max(
+                    geometry.boundingBox.max.x - geometry.boundingBox.min.x,
+                    geometry.boundingBox.max.y - geometry.boundingBox.min.y,
+                    geometry.boundingBox.max.z - geometry.boundingBox.min.z
+                );
+                const scale = 5 / maxDim; // Scale to be roughly size 5
+                
+                const material = new THREE.MeshPhysicalMaterial({ 
+                    color: 0x00ffcc, 
+                    metalness: 0.2, 
+                    roughness: 0.1,
+                    clearcoat: 1.0
+                });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.scale.set(scale, scale, scale);
+                mesh.rotation.x = -Math.PI / 2; // STL often comes in rotated
+                scene.add(mesh);
+            },
+            (xhr) => { console.log((xhr.loaded / xhr.total * 100) + '% loaded'); },
+            (error) => {
+                console.warn("No 'model.stl' found. Loading fallback Cube.");
+                const geometry = new THREE.BoxGeometry(3, 3, 3);
+                const material = new THREE.MeshNormalMaterial();
+                const cube = new THREE.Mesh(geometry, material);
+                scene.add(cube);
+            }
+        );
 
-    function normalize(vx, vy) {
-        const len = Math.hypot(vx, vy);
-        if (len < 1e-6) return { x: 0, y: 0 };
-        return { x: vx / len, y: vy / len };
-    }
+        // --- 4. MEDIAPIPE FACE TRACKING SETUP ---
+        const video = document.getElementById('webcam-video');
+        let faceLandmarker;
+        let lastVideoTime = -1;
+        let headPos = new THREE.Vector3(0, 0, 10); // Target position
+        let currentPos = new THREE.Vector3(0, 0, 10); // Current smoothed position
 
-    // Line intersection: p1 + t*d1 with p2 + u*d2
-    function intersect(p1, d1, p2, d2) {
-        const x1 = p1.x, y1 = p1.y;
-        const x2 = p1.x + d1.x, y2 = p1.y + d1.y;
-        const x3 = p2.x, y3 = p2.y;
-        const x4 = p2.x + d2.x, y4 = p2.y + d2.y;
-
-        const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
-        if (Math.abs(denom) < 1e-6) return null;
-
-        const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
-        return { x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1) };
-    }
-
-    function dirToVP(from, vp) {
-        return { x: vp.x - from.x, y: vp.y - from.y };
-    }
-
-    function drawCube() {
-        const p1 = state.anchor;
-
-        // Build three rays toward VPs
-        let d1n = normalize(state.vp1.x - p1.x, state.vp1.y - p1.y);
-        let d2n = normalize(state.vp2.x - p1.x, state.vp2.y - p1.y);
-        let d3n = normalize(state.vp3.x - p1.x, state.vp3.y - p1.y);
-
-        // If any VP is too close to p1, nudge directions
-        if (d1n.x === 0 && d1n.y === 0) d1n = { x: 1, y: 0 };
-        if (d2n.x === 0 && d2n.y === 0) d2n = { x: 0, y: 1 };
-        if (d3n.x === 0 && d3n.y === 0) d3n = { x: -1, y: 0 };
-
-        // Step along each ray by image extents a,b,c
-        const p2 = { x: p1.x + d1n.x * state.a, y: p1.y + d1n.y * state.a }; // toward VP1
-        const p4 = { x: p1.x + d2n.x * state.c, y: p1.y + d2n.y * state.c }; // toward VP2
-        const p5 = { x: p1.x + d3n.x * state.b, y: p1.y + d3n.y * state.b }; // toward VP3
-
-        // Complete the box with intersections (keeping parallels meeting at the same VP)
-        const p3 = intersect(p2, dirToVP(p2, state.vp2), p4, dirToVP(p4, state.vp1));
-        const p6 = intersect(p5, dirToVP(p5, state.vp1), p2, dirToVP(p2, state.vp3));
-        const p8 = intersect(p5, dirToVP(p5, state.vp2), p4, dirToVP(p4, state.vp3));
-        const p7 = p6 && p8
-            ? intersect(p6, dirToVP(p6, state.vp2), p8, dirToVP(p8, state.vp1))
-            : null;
-
-        const verts = [p1, p2, p3, p4, p5, p6, p7, p8];
-        if (verts.some(v => !v)) {
-            // Degenerate configuration; draw what we can (guides and points)
-            return;
+        async function initVision() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
+            );
+            faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
+                    delegate: "GPU"
+                },
+                outputFaceBlendshapes: false,
+                runningMode: "VIDEO",
+                numFaces: 1
+            });
+            document.getElementById('loading').style.display = 'none';
+            startWebcam();
         }
 
-        // Edges of a cuboid
-        const edges = [
-            [0,1],[1,2],[2,3],[3,0], // bottom face loop
-            [4,5],[5,6],[6,7],[7,4], // top face loop
-            [0,4],[1,5],[2,6],[3,7]  // verticals
-        ];
+        function startWebcam() {
+            navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
+                video.srcObject = stream;
+                video.addEventListener("loadeddata", predictWebcam);
+            });
+        }
 
-        // Draw faces with very light fill to keep overlap subtle
-        const faces = [
-            [0,1,2,3],
-            [4,5,6,7],
-            [0,1,5,4],
-            [1,2,6,5],
-            [2,3,7,6],
-            [3,0,4,7]
-        ];
-        faces.forEach(face => {
-            ctx.beginPath();
-            ctx.moveTo(verts[face[0]].x, verts[face[0]].y);
-            for (let i = 1; i < face.length; i++) ctx.lineTo(verts[face[i]].x, verts[face[i]].y);
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(102,126,234,0.08)';
-            ctx.fill();
+        // --- 5. THE LOOP ---
+        async function predictWebcam() {
+            let startTimeMs = performance.now();
+
+            if (video.currentTime !== lastVideoTime) {
+                lastVideoTime = video.currentTime;
+                const results = faceLandmarker.detectForVideo(video, startTimeMs);
+
+                if (results.faceLandmarks.length > 0) {
+                    const landmarks = results.faceLandmarks[0];
+
+                    // --- PINHOLE MODEL CALCULATION ---
+                    
+                    // 1. Find center of face (nose tip is approx index 1)
+                    const nose = landmarks[1]; 
+                    
+                    // 2. Calculate approximate depth (Z)
+                    // We measure distance between left eye outer (33) and right eye outer (263)
+                    const leftEye = landmarks[33];
+                    const rightEye = landmarks[263];
+                    const dx = leftEye.x - rightEye.x;
+                    const dy = leftEye.y - rightEye.y;
+                    const eyeDist = Math.sqrt(dx*dx + dy*dy);
+                    
+                    // "0.15" is a magic number based on typical eye distance in frame at ~50cm away
+                    // If eyeDist is SMALL, user is FAR (Z increases)
+                    // If eyeDist is LARGE, user is CLOSE (Z decreases)
+                    const estimatedZ = (0.15 / eyeDist) * 10; 
+
+                    // 3. Map X and Y to 3D space
+                    // MediaPipe coords: x (0 to 1), y (0 to 1). 
+                    // We shift center to (0.5, 0.5) -> (-0.5 to 0.5)
+                    // Note: We FLIP X because webcam is mirrored for the user, but we want 
+                    // moving head left to move camera left.
+                    const rawX = (nose.x - 0.5) * -1; 
+                    const rawY = (nose.y - 0.5) * -1; // Invert Y because screen Y is top-down
+
+                    headPos.x = rawX * SENSITIVITY_X * estimatedZ; 
+                    headPos.y = rawY * SENSITIVITY_Y * estimatedZ;
+                    headPos.z = estimatedZ * 1.5; // Scale Z slightly
+                }
+            }
+
+            // Smooth Interpolation (Lerp) to prevent jitter
+            currentPos.lerp(headPos, SMOOTHING);
+
+            // Update Camera
+            camera.position.copy(currentPos);
+            camera.lookAt(0, 0, 0); // Always look at origin
+
+            renderer.render(scene, camera);
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
         });
 
-        // Draw edges
-        ctx.lineWidth = 2.2;
-        ctx.strokeStyle = '#2c3e50';
-        edges.forEach(([i,j]) => {
-            ctx.beginPath();
-            ctx.moveTo(verts[i].x, verts[i].y);
-            ctx.lineTo(verts[j].x, verts[j].y);
-            ctx.stroke();
-        });
-
-        // Draw the base corner handle
-        ctx.beginPath();
-        ctx.arc(p1.x, p1.y, 7, 0, Math.PI * 2);
-        ctx.fillStyle = '#8e44ad';
-        ctx.fill();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = 'white';
-        ctx.stroke();
-    }
-
-    function drawGuides() {
-        // Dashed guides from anchor to VPs
-        const p = state.anchor;
-        ctx.setLineDash([5, 5]);
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = '#dee2e6';
-
-        [state.vp1, state.vp2, state.vp3].forEach(vp => {
-            ctx.beginPath();
-            ctx.moveTo(p.x, p.y);
-            ctx.lineTo(vp.x, vp.y);
-            ctx.stroke();
-        });
-        ctx.setLineDash([]);
-
-        // Draw VPs
-        const vps = [
-            { pos: state.vp1, color: '#e74c3c', label: 'VP1' },
-            { pos: state.vp2, color: '#3498db', label: 'VP2' },
-            { pos: state.vp3, color: '#2ecc71', label: 'VP3' }
-        ];
-        vps.forEach(vp => {
-            ctx.beginPath();
-            ctx.arc(vp.pos.x, vp.pos.y, 9, 0, Math.PI * 2);
-            ctx.fillStyle = vp.color;
-            ctx.fill();
-            ctx.lineWidth = 2;
-            ctx.strokeStyle = 'white';
-            ctx.stroke();
-
-            ctx.fillStyle = '#2c3e50';
-            ctx.font = 'bold 12px sans-serif';
-            ctx.fillText(vp.label, vp.pos.x + 12, vp.pos.y - 12);
-        });
-    }
-
-    function draw() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        drawGuides();
-        drawCube();
-    }
-
-    // Interaction
-    canvas.addEventListener('mousedown', (e) => {
-        const pos = getMousePos(e);
-        if (dist(pos, state.vp1) < 14) state.dragging = 'vp1';
-        else if (dist(pos, state.vp2) < 14) state.dragging = 'vp2';
-        else if (dist(pos, state.vp3) < 14) state.dragging = 'vp3';
-        else if (dist(pos, state.anchor) < 10) state.dragging = 'anchor';
-    });
-
-    canvas.addEventListener('mousemove', (e) => {
-        if (!state.dragging) return;
-        const pos = clampPoint(getMousePos(e));
-        state[state.dragging] = pos;
-        draw();
-    });
-
-    canvas.addEventListener('mouseup', () => { state.dragging = null; });
-    canvas.addEventListener('mouseleave', () => { state.dragging = null; });
-
-    // Controls
-    const inputs = {
-        a: document.getElementById('sideA'),
-        b: document.getElementById('sideB'),
-        c: document.getElementById('sideC'),
-    };
-    const displays = {
-        a: document.getElementById('valueA'),
-        b: document.getElementById('valueB'),
-        c: document.getElementById('valueC'),
-    };
-
-    inputs.a.addEventListener('input', (e) => {
-        state.a = parseInt(e.target.value, 10);
-        displays.a.textContent = state.a;
-        draw();
-    });
-    inputs.b.addEventListener('input', (e) => {
-        state.b = parseInt(e.target.value, 10);
-        displays.b.textContent = state.b;
-        draw();
-    });
-    inputs.c.addEventListener('input', (e) => {
-        state.c = parseInt(e.target.value, 10);
-        displays.c.textContent = state.c;
-        draw();
-    });
-
-    // Initial draw
-    draw();
-</script>
+        initVision();
+    </script>
 </body>
 </html>
