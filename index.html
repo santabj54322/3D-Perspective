@@ -162,7 +162,7 @@
             // 1. Calculate Base Normalization Scale (make it ~10cm wide initially)
             const width = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
             
-            baseNormalizedScale = width*10;
+            baseNormalizedScale = 10;
 
             currentMesh = new THREE.Mesh(geometry, meshMaterial);
             
