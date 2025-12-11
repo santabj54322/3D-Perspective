@@ -176,7 +176,7 @@
             // 1. Calculate Base Normalization Scale (make it ~10cm wide initially)
             const width = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
             
-            baseNormalizedScale = 1;
+            baseNormalizedScale = 3;
 
             currentMesh = new THREE.Mesh(geometry, meshMaterial);
             
@@ -297,7 +297,6 @@
           group.add(right);
 
           group.position.y -= 10
-          group.scale.setScalar(5);
         
           hallwayGroup = group;
           currentMesh = group;
