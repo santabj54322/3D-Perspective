@@ -123,19 +123,31 @@
         const light = new THREE.DirectionalLight(0xffffff, 2);
         light.position.set(10, 20, 15);
         scene.add(light);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+        scene.add(new THREE.AmbientLight(0xffffff, 0.2));
 
         // Helper Grid (1 unit = 1cm) -> 50cm grid
-        const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
-        scene.add(grid);
+        // const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
+        // scene.add(grid);
         
         // Add Axes helper at origin
-        scene.add(new THREE.AxesHelper(10));
+        // scene.add(new THREE.AxesHelper(10));
+
+        scene.fog = new THREE.FogExp2(0x000000, 0.0025);
 
         const stlLoader = new STLLoader();
         const meshMaterial = new THREE.MeshPhysicalMaterial({
             color: 0x00aaff, metalness: 0.2, roughness: 0.3, clearcoat: 0.5
         });
+
+        let hallwayGroup = null;
+        let isHallway = false;
+        let hallwayDepthScale = 1; // driven by the existing scale slider for Z only
+        
+        const HALLWAY = {
+          baseWidth: 1,   // base inner width at the entrance (cm, arbitrary base)
+          baseHeight: 1,  // base inner height at the entrance (cm, arbitrary base)
+          length: 2000    // tunnel depth in cm (20 m)
+        };
 
         // ==========================================
         // 3. UI & OBJECT MANAGEMENT
@@ -150,6 +162,8 @@
 
         // --- Helper: Replace current mesh in scene ---
         function replaceMesh(geometry) {
+            isHallway = false;
+            hallwayGroup = null;
             if(currentMesh) {
                 scene.remove(currentMesh);
                 currentMesh.geometry.dispose();
@@ -236,8 +250,63 @@
         updateFocalLengthMath(); // Init math based on default slider value
         
         // Load initial fallback cube
-        const initialGeo = new THREE.BoxGeometry(10, 10, 10);
-        replaceMesh(initialGeo);
+
+        // Build a 4-sided corridor that starts exactly at z=0 and goes to negative Z
+        function buildHallway() {
+          // Clean any existing mesh/group
+          if (currentMesh) {
+            scene.remove(currentMesh);
+            currentMesh.traverse?.(o => { if (o.geometry) o.geometry.dispose(); });
+          }
+        
+          const w = HALLWAY.baseWidth;
+          const h = HALLWAY.baseHeight;
+          const L = HALLWAY.length;
+        
+          const mat = new THREE.MeshStandardMaterial({
+            color: 0x2a2a2a,
+            roughness: 0.95,
+            metalness: 0.0,
+            side: THREE.DoubleSide
+          });
+        
+          const group = new THREE.Group();
+        
+          // Floor
+          const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, L), mat);
+          floor.rotation.x = -Math.PI / 2;        // XY -> XZ
+          floor.position.set(0, -h / 2, -L / 2);  // front edge at z=0, extends to -L
+          group.add(floor);
+        
+          // Ceiling
+          const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(w, L), mat);
+          ceiling.rotation.x = -Math.PI / 2;
+          ceiling.position.set(0, h / 2, -L / 2);
+          group.add(ceiling);
+        
+          // Left wall
+          const left = new THREE.Mesh(new THREE.PlaneGeometry(L, h), mat);
+          left.rotation.y = Math.PI / 2;          // XY -> ZY
+          left.position.set(-w / 2, 0, -L / 2);
+          group.add(left);
+        
+          // Right wall
+          const right = new THREE.Mesh(new THREE.PlaneGeometry(L, h), mat);
+          right.rotation.y = -Math.PI / 2;
+          right.position.set(w / 2, 0, -L / 2);
+          group.add(right);
+        
+          hallwayGroup = group;
+          currentMesh = group;
+          isHallway = true;
+          baseNormalizedScale = 1; // not used for hallway X/Y (we drive those dynamically)
+          scene.add(group);
+        }
+
+        // const initialGeo = new THREE.BoxGeometry(10, 10, 10);
+        // replaceMesh(initialGeo);
+
+        buildHallway()
 
 
         // ==========================================
