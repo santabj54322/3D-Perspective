@@ -123,7 +123,7 @@
         const light = new THREE.DirectionalLight(0xffffff, 2);
         light.position.set(10, 20, 15);
         scene.add(light);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
         // Helper Grid (1 unit = 1cm) -> 50cm grid
         // const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
@@ -295,9 +295,12 @@
           right.rotation.y = -Math.PI / 2;
           right.position.set(w / 2, 0, -L / 2);
           group.add(right);
+
+          group.position.y -= 10
         
           hallwayGroup = group;
           currentMesh = group;
+            
           isHallway = true;
           baseNormalizedScale = 1; // not used for hallway X/Y (we drive those dynamically)
           scene.add(group);
@@ -384,7 +387,7 @@
 
             // 3. Update Camera
             camera.position.copy(currentPos);
-            camera.lookAt(0, 0, 0);
+            camera.lookAt(0, -10, 0);
 
             renderer.render(scene, camera);
             requestAnimationFrame(renderLoop);
