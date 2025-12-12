@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Interactive 3D Head Tracking</title>
+    <title>Interactive 3D Head Tracking - Hallway Portal</title>
     <style>
         body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; color: #eee; }
         
@@ -57,14 +57,14 @@
 
     <div id="controls-container">
         <div class="control-group">
-            <label>Webcam Vertical FOV: <span id="fov-val" class="val-display">55°</span></label>
-            <input type="range" id="fov-slider" min="30" max="80" step="1" value="55">
-            <small style="color:#aaa">Adjust until depth movement feels realistic.</small>
+            <label>Screen Height (cm): <span id="fov-val" class="val-display">30</span></label>
+            <input type="range" id="fov-slider" min="15" max="60" step="1" value="30">
+            <small style="color:#aaa">Match this to your physical monitor height.</small>
         </div>
 
         <div class="control-group" style="border-top: 1px solid #444; padding-top: 20px;">
-            <label>Object Scale Multiplier: <span id="scale-val" class="val-display">1.0x</span></label>
-            <input type="range" id="scale-slider" min="0.1" max="10" step="0.1" value="1.0">
+            <label>Tunnel Length: <span id="scale-val" class="val-display">1.0x</span></label>
+            <input type="range" id="scale-slider" min="0.1" max="5" step="0.1" value="1.0">
         </div>
 
         <div class="control-group">
@@ -95,222 +95,166 @@
         // 1. GLOBAL STATE & CONFIG
         // ==========================================
         const CONFIG = {
-            WEBCAM_FOV_Y: 55,     // Updated by slider
+            SCREEN_HEIGHT_CM: 30, // Default physical screen height
             REAL_IPD_CM: 6.4,     // Avg human IPD
-            SMOOTHING: 0.5
+            SMOOTHING: 0.15       // Lower = smoother, higher = faster
         };
 
-        // Math helper variable (calculated later)
-        let focalLengthNorm = 0;
+        // Screen Dimensions (World Units)
+        // We assume 1 World Unit = 1 CM
+        let worldScreenWidth = 0;
+        let worldScreenHeight = CONFIG.SCREEN_HEIGHT_CM;
+
+        // Math helper variable
+        // We use a fixed reference FOV for depth estimation logic
+        let focalLengthNorm = 0.8; 
 
         // Mesh State
         let currentMesh = null;
-        let baseNormalizedScale = 1.0; // Scale required to make object 10cm wide initially
-        let scaleMultiplier = 1.0;     // Value from slider (0.1x to 10x)
+        let scaleMultiplier = 1.0; 
 
         // ==========================================
         // 2. THREE.JS SETUP
         // ==========================================
         const scene = new THREE.Scene();
-        scene.background = new THREE.Color(0x111111);
+        scene.background = new THREE.Color(0x050505);
 
-        const camera = new THREE.PerspectiveCamera(CONFIG.WEBCAM_FOV_Y, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
+        // Important: Camera rotation must stay at (0,0,0) for the window illusion
+        camera.rotation.set(0, 0, 0);
+
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
         document.getElementById('canvas-container').appendChild(renderer.domElement);
 
         // Lighting
-        const light = new THREE.DirectionalLight(0xffffff, 2);
-        light.position.set(10, 20, 15);
+        const light = new THREE.PointLight(0xffffff, 1.5, 1000);
+        light.position.set(0, 0, 50); // Light near the viewer
         scene.add(light);
-        scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+        scene.add(new THREE.AmbientLight(0xffffff, 0.2));
 
-        // Helper Grid (1 unit = 1cm) -> 50cm grid
-        // const grid = new THREE.GridHelper(100, 100, 0x333333, 0x222222);
-        // scene.add(grid);
-        
-        // Add Axes helper at origin
-        // scene.add(new THREE.AxesHelper(10));
-
-        scene.fog = new THREE.FogExp2(0x000000, 0.0025);
+        scene.fog = new THREE.Fog(0x000000, 10, 800);
 
         const stlLoader = new STLLoader();
         const meshMaterial = new THREE.MeshPhysicalMaterial({
-            color: 0x00aaff, metalness: 0.2, roughness: 0.3, clearcoat: 0.5
+            color: 0x00aaff, metalness: 0.5, roughness: 0.2, clearcoat: 1.0
         });
-
-        let hallwayGroup = null;
-        let isHallway = false;
-        let hallwayDepthScale = 1; // driven by the existing scale slider for Z only
-        
-        const HALLWAY = {
-          baseWidth: 1,   // base inner width at the entrance (cm, arbitrary base)
-          baseHeight: 1,  // base inner height at the entrance (cm, arbitrary base)
-          length: 2000    // tunnel depth in cm (20 m)
-        };
 
         // ==========================================
         // 3. UI & OBJECT MANAGEMENT
         // ==========================================
 
-        // --- Helper: Recalculate Physics Math based on FOV ---
-        function updateFocalLengthMath() {
-             const fovRad = (CONFIG.WEBCAM_FOV_Y * Math.PI) / 180;
-             // focal_length = 0.5 / tan(FOV/2)
-             focalLengthNorm = 0.5 / Math.tan(fovRad / 2);
+        // --- Helper: Update Screen Dimensions ---
+        function updateScreenDimensions() {
+            const aspect = window.innerWidth / window.innerHeight;
+            worldScreenHeight = CONFIG.SCREEN_HEIGHT_CM;
+            worldScreenWidth = worldScreenHeight * aspect;
+            
+            // Rebuild hallway when screen size changes to keep it "fitted"
+            buildHallway(); 
         }
 
-        // --- Helper: Replace current mesh in scene ---
-        function replaceMesh(geometry) {
-            isHallway = false;
-            hallwayGroup = null;
-            if(currentMesh) {
+        // --- Helper: Build the Hallway Portal ---
+        function buildHallway() {
+            if (currentMesh) {
                 scene.remove(currentMesh);
-                currentMesh.geometry.dispose();
+                currentMesh.traverse?.(o => { if (o.geometry) o.geometry.dispose(); });
             }
 
-            geometry.center();
-            geometry.computeBoundingBox();
-            geometry.computeVertexNormals(); // Ensure smooth lighting
+            // Dimensions derived from Screen Size
+            const w = worldScreenWidth;
+            const h = worldScreenHeight;
+            const depth = 2000; 
 
-            // 1. Calculate Base Normalization Scale (make it ~10cm wide initially)
-            const width = geometry.boundingBox.max.x - geometry.boundingBox.min.x;
+            // Texture generation for a grid pattern
+            const canvas = document.createElement('canvas');
+            canvas.width = 512; canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#111'; ctx.fillRect(0,0,512,512);
+            ctx.strokeStyle = '#00ffaa'; ctx.lineWidth = 4;
+            ctx.strokeRect(0,0,512,512); // border
+            // cross
+            ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(512,512); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(512,0); ctx.lineTo(0,512); ctx.stroke();
             
-            baseNormalizedScale = 3;
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.wrapS = THREE.RepeatWrapping;
+            tex.wrapT = THREE.RepeatWrapping;
+            tex.repeat.set(1, 10); // Stretch down the hall
 
-            currentMesh = new THREE.Mesh(geometry, meshMaterial);
+            const mat = new THREE.MeshStandardMaterial({ 
+                map: tex, 
+                side: THREE.BackSide, // Render INSIDE the box
+                roughness: 0.4
+            });
+
+            // Create a Box that acts as the tunnel
+            // Width/Height match screen exactly. Depth extends backwards.
+            const geometry = new THREE.BoxGeometry(w, h, depth);
             
-            // STL standard orientation fix
-            currentMesh.rotation.x = -Math.PI / 2; 
+            // Shift geometry so the front face is at Z=0 and it goes to -depth
+            geometry.translate(0, 0, -depth / 2);
 
-            scene.add(currentMesh);
-            // Apply current slider scale instantly
-            applyCurrentScale();
+            const tunnel = new THREE.Mesh(geometry, mat);
+            currentMesh = tunnel;
+            scene.add(tunnel);
         }
-
-        // --- Helper: Apply slider scale to base scale ---
-        function applyCurrentScale() {
-            if(!currentMesh) return;
-            const finalScale = baseNormalizedScale * scaleMultiplier;
-            currentMesh.scale.set(finalScale, finalScale, finalScale);
+        
+        // Use STLLoader logic (unchanged essentially, just positioning)
+        function replaceMesh(geometry) {
+             if(currentMesh) scene.remove(currentMesh);
+             
+             geometry.center();
+             geometry.computeBoundingBox();
+             const size = geometry.boundingBox.getSize(new THREE.Vector3());
+             
+             // Scale object to fit comfortably inside the screen height (approx 50%)
+             const scale = (worldScreenHeight * 0.5) / size.y;
+             
+             currentMesh = new THREE.Mesh(geometry, meshMaterial);
+             currentMesh.scale.set(scale, scale, scale);
+             currentMesh.position.set(0, 0, -50); // Place it inside the screen
+             scene.add(currentMesh);
         }
-
 
         // --- EVENT LISTENERS FOR UI ---
 
-        // 1. FOV SLIDER
+        // 1. SCREEN HEIGHT SLIDER (Replaces FOV)
         const fovSlider = document.getElementById('fov-slider');
         const fovDisplay = document.getElementById('fov-val');
         fovSlider.addEventListener('input', (e) => {
             const val = parseInt(e.target.value);
-            CONFIG.WEBCAM_FOV_Y = val;
-            fovDisplay.innerText = val + "°";
-            
-            // Update ThreeJS Camera
-            camera.fov = val;
-            camera.updateProjectionMatrix();
-            
-            // Update Physics Math
-            updateFocalLengthMath();
+            CONFIG.SCREEN_HEIGHT_CM = val;
+            fovDisplay.innerText = val;
+            updateScreenDimensions();
         });
 
-        // 2. SCALE SLIDER
+        // 2. DEPTH SCALE SLIDER
         const scaleSlider = document.getElementById('scale-slider');
         const scaleDisplay = document.getElementById('scale-val');
         scaleSlider.addEventListener('input', (e) => {
-             scaleMultiplier = parseFloat(e.target.value);
-             scaleDisplay.innerText = scaleMultiplier.toFixed(1) + "x";
-             applyCurrentScale();
+             const val = parseFloat(e.target.value);
+             scaleDisplay.innerText = val.toFixed(1) + "x";
+             if(currentMesh) currentMesh.scale.z = val; 
         });
 
-        // 3. FILE UPLOAD BUTTON
+        // 3. FILE UPLOAD
         const fileInput = document.getElementById('file-input');
         fileInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (!file) return;
-
             const reader = new FileReader();
             reader.onload = function(event) {
                  try {
                      const geometry = stlLoader.parse(event.target.result);
                      replaceMesh(geometry);
-                     // Reset scale slider for new object interaction
-                     scaleMultiplier = 1.0;
-                     scaleSlider.value = 1.0;
-                     scaleDisplay.innerText = "1.0x";
-                 } catch (err) {
-                     alert("Error parsing STL file. It might be corrupted or wrong format.");
-                     console.error(err);
-                 }
+                 } catch (err) { console.error(err); }
             };
             reader.readAsArrayBuffer(file);
         });
 
         // --- INITIALIZATION ---
-        updateFocalLengthMath(); // Init math based on default slider value
-        
-        // Load initial fallback cube
-
-        // Build a 4-sided corridor that starts exactly at z=0 and goes to negative Z
-        function buildHallway() {
-          // Clean any existing mesh/group
-          if (currentMesh) {
-            scene.remove(currentMesh);
-            currentMesh.traverse?.(o => { if (o.geometry) o.geometry.dispose(); });
-          }
-        
-          const w = HALLWAY.baseWidth;
-          const h = HALLWAY.baseHeight;
-          const L = HALLWAY.length;
-        
-          const mat = new THREE.MeshStandardMaterial({
-            color: 0x2a2a2a,
-            roughness: 0.95,
-            metalness: 0.0,
-            side: THREE.DoubleSide
-          });
-        
-          const group = new THREE.Group();
-        
-          // Floor
-          const floor = new THREE.Mesh(new THREE.PlaneGeometry(w, L), mat);
-          floor.rotation.x = -Math.PI / 2;        // XY -> XZ
-          floor.position.set(0, -h / 2, -L / 2);  // front edge at z=0, extends to -L
-          group.add(floor);
-        
-          // Ceiling
-          const ceiling = new THREE.Mesh(new THREE.PlaneGeometry(w, L), mat);
-          ceiling.rotation.x = -Math.PI / 2;
-          ceiling.position.set(0, h / 2, -L / 2);
-          group.add(ceiling);
-        
-          // Left wall
-          const left = new THREE.Mesh(new THREE.PlaneGeometry(L, h), mat);
-          left.rotation.y = Math.PI / 2;          // XY -> ZY
-          left.position.set(-w / 2, 0, -L / 2);
-          group.add(left);
-        
-          // Right wall
-          const right = new THREE.Mesh(new THREE.PlaneGeometry(L, h), mat);
-          right.rotation.y = -Math.PI / 2;
-          right.position.set(w / 2, 0, -L / 2);
-          group.add(right);
-
-          group.position.y -= 10
-        
-          hallwayGroup = group;
-          currentMesh = group;
-            
-          isHallway = true;
-          baseNormalizedScale = 1; // not used for hallway X/Y (we drive those dynamically)
-          scene.add(group);
-        }
-
-        // const initialGeo = new THREE.BoxGeometry(10, 10, 10);
-        // replaceMesh(initialGeo);
-
-        buildHallway()
-
+        updateScreenDimensions(); // Build initial hallway
 
         // ==========================================
         // 4. MEDIAPIPE LOGIC & MAIN LOOP
@@ -318,8 +262,10 @@
         const video = document.getElementById('webcam-preview');
         const infoDiv = document.getElementById('info');
         let faceLandmarker;
-        const currentPos = new THREE.Vector3(0, 0, 60);
-        const targetPos = new THREE.Vector3(0, 0, 60);
+        
+        // Track Head Position
+        const currentHeadPos = new THREE.Vector3(0, 0, 60); // Start at 60cm distance
+        const targetHeadPos = new THREE.Vector3(0, 0, 60);
 
         async function initVision() {
             const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm");
@@ -333,11 +279,44 @@
             });
             
             document.getElementById('loading').style.display = 'none';
-            
             navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } }).then((stream) => {
                 video.srcObject = stream;
                 video.addEventListener("loadeddata", renderLoop);
             });
+        }
+
+        // --- KEY LOGIC: OFF-AXIS PROJECTION ---
+        // This makes the monitor behave like a window.
+        function updateOffAxisProjection(camera, headPos) {
+            // 1. Position camera exactly where the head is
+            camera.position.copy(headPos);
+            
+            // 2. Calculate the frustum planes at the Screen Plane (Z=0)
+            // The screen is located at Z=0. The camera is at Z=headPos.z.
+            const near = 0.1; 
+            const far = 5000;
+            
+            // Distance from eye to screen plane
+            const dist = Math.abs(headPos.z); 
+            
+            // Ratio of NearPlane / ScreenPlane
+            const ratio = near / dist;
+
+            // Screen boundaries relative to the camera's X/Y position
+            // Left edge of screen is at -worldScreenWidth/2.
+            // Right edge is at +worldScreenWidth/2.
+            // But these are relative to World Origin (0,0).
+            // Relative to Camera (headPos.x), the Left edge is (-W/2 - headX).
+            
+            const left   = (-worldScreenWidth / 2 - headPos.x) * ratio;
+            const right  = ( worldScreenWidth / 2 - headPos.x) * ratio;
+            const top    = ( worldScreenHeight / 2 - headPos.y) * ratio;
+            const bottom = (-worldScreenHeight / 2 - headPos.y) * ratio;
+
+            // Apply the skewed projection matrix
+            camera.projectionMatrix.makePerspective(left, right, top, bottom, near, far);
+            
+            // Note: camera.lookAt is NOT used. The camera forward vector remains parallel to Z axis.
         }
 
         let lastVideoTime = -1;
@@ -351,43 +330,39 @@
                 if (results.faceLandmarks.length > 0) {
                     const landmarks = results.faceLandmarks[0];
 
-                    // Pupils: 468 (Left), 473 (Right)
+                    // Standard Pupil detection for Z depth
                     const leftPupil = landmarks[468];
                     const rightPupil = landmarks[473];
-                    const aspect = video.videoWidth / video.videoHeight;
-                    
-                    // Distance between pupils in normalized screen units
-                    const dx = (leftPupil.x - rightPupil.x) * aspect;
+                    const dx = (leftPupil.x - rightPupil.x);
                     const dy = (leftPupil.y - rightPupil.y);
                     const distScreen = Math.sqrt(dx*dx + dy*dy);
+                    
+                    // Note: "distScreen" here is raw normalized 0..1 distance.
+                    // We approximate Z based on a calibrated constant (0.06 is roughly iris distance at 60cm)
+                    // Simplified calibration:
+                    const zCm = (0.065 / distScreen) * 60; // Rough estimator
 
-                    // Pinhole Z Calculation
-                    const zCm = (CONFIG.REAL_IPD_CM * focalLengthNorm) / distScreen;
-
-                    // Midpoint in normalized screen coords
+                    // XY Calculation
+                    // Center of screen is 0.5, 0.5
                     const midX = (leftPupil.x + rightPupil.x) / 2;
                     const midY = (leftPupil.y + rightPupil.y) / 2;
 
-                    // Center coordinates [-0.5, 0.5] and flip X
-                    const xScreen = (0.5 - midX) * aspect; 
-                    const yScreen = (0.5 - midY);
+                    // Convert Normalized (0-1) to World CM (Screen Size)
+                    // We flip X because webcam is mirrored
+                    const xCm = -(midX - 0.5) * worldScreenWidth * (zCm / 60) * 1.5; 
+                    const yCm = -(midY - 0.5) * worldScreenHeight * (zCm / 60) * 1.5;
 
-                    // Project screen coords to world coords
-                    const xCm = (xScreen * zCm) / focalLengthNorm;
-                    const yCm = (yScreen * zCm) / focalLengthNorm;
-
-                    targetPos.set(xCm, yCm, zCm);
+                    targetHeadPos.set(xCm, yCm, zCm);
                     
-                    infoDiv.innerText = `Head Pos: X:${xCm.toFixed(0)} Y:${yCm.toFixed(0)} Z:${zCm.toFixed(0)} cm`;
+                    infoDiv.innerText = `Head: ${xCm.toFixed(0)}, ${yCm.toFixed(0)}, ${zCm.toFixed(0)}cm`;
                 }
             }
 
             // 2. Smooth Movement
-            currentPos.lerp(targetPos, CONFIG.SMOOTHING);
+            currentHeadPos.lerp(targetHeadPos, CONFIG.SMOOTHING);
 
-            // 3. Update Camera
-            camera.position.copy(currentPos);
-            camera.lookAt(0, -10, 0);
+            // 3. Update Camera using Off-Axis Projection
+            updateOffAxisProjection(camera, currentHeadPos);
 
             renderer.render(scene, camera);
             requestAnimationFrame(renderLoop);
@@ -395,9 +370,8 @@
 
         // Handle Window Resize
         window.addEventListener('resize', () => {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            updateScreenDimensions(); // Recalculate Hallway size
         });
 
         initVision();
